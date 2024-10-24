@@ -3,7 +3,37 @@
 # Mapping of sky130 hd cells to number of sites and number of transistors
 # (each site has a width of 460 nm and a height of 2720 nm)
 
-regular_cells = {
+import collections
+import os
+import queue
+import re
+import threading
+
+_CELL_PATTERN = r'\b(sky130_\w+) \b'
+_PAGE_SIZE = os.sysconf('SC_PAGE_SIZE') or 4096
+_FILLER_CELLS = {
+    'sky130_ef_sc_hd__decap_12': (12, 2),
+    'sky130_ef_sc_hd__fakediode_2': (2, 0),
+    'sky130_fd_sc_hd__diode_2': (2, 0),
+    'sky130_fd_sc_hd__fill_1': (1, 0),
+    'sky130_fd_sc_hd__fill_2': (2, 0),
+    'sky130_fd_sc_hd__fill_4': (4, 0),
+    'sky130_fd_sc_hd__fill_8': (8, 0),
+    'sky130_ef_sc_hd__fill_8': (8, 0),
+    'sky130_ef_sc_hd__fill_12': (12, 0),
+    'sky130_fd_sc_hd__decap_3': (3, 2),
+    'sky130_fd_sc_hd__decap_4': (4, 2),
+    'sky130_fd_sc_hd__decap_6': (6, 2),
+    'sky130_fd_sc_hd__decap_8': (8, 2),
+    'sky130_fd_sc_hd__decap_12': (12, 2),
+    'sky130_fd_sc_hd__macro_sparecell': (29, 0),
+    'sky130_fd_sc_hd__tapvgnd2_1': (1, 0),
+    'sky130_fd_sc_hd__tapvgnd_1': (1, 0),
+    'sky130_fd_sc_hd__tapvpwrvgnd_1': (1, 0),
+    'sky130_fd_sc_hd__tap_1': (1, 0),
+    'sky130_fd_sc_hd__tap_2': (2, 0),
+}
+_REGULAR_CELLS = {
     'sky130_fd_sc_hd__a2bb2oi_1': (7, 10),
     'sky130_fd_sc_hd__a2bb2oi_2': (12, 10),
     'sky130_fd_sc_hd__a2bb2oi_4': (21, 10),
@@ -427,57 +457,92 @@ regular_cells = {
     'sky130_fd_sc_hd__xor3_4': (22, 22),
 }
 
-filler_cells = {
-    'sky130_ef_sc_hd__decap_12': (12, 2),
-    'sky130_ef_sc_hd__fakediode_2': (2, 0),
-    'sky130_fd_sc_hd__diode_2': (2, 0),
-    'sky130_fd_sc_hd__fill_1': (1, 0),
-    'sky130_fd_sc_hd__fill_2': (2, 0),
-    'sky130_fd_sc_hd__fill_4': (4, 0),
-    'sky130_fd_sc_hd__fill_8': (8, 0),
-    'sky130_ef_sc_hd__fill_8': (8, 0),
-    'sky130_ef_sc_hd__fill_12': (12, 0),
-    'sky130_fd_sc_hd__decap_3': (3, 2),
-    'sky130_fd_sc_hd__decap_4': (4, 2),
-    'sky130_fd_sc_hd__decap_6': (6, 2),
-    'sky130_fd_sc_hd__decap_8': (8, 2),
-    'sky130_fd_sc_hd__decap_12': (12, 2),
-    'sky130_fd_sc_hd__macro_sparecell': (29, 0),
-    'sky130_fd_sc_hd__tapvgnd2_1': (1, 0),
-    'sky130_fd_sc_hd__tapvgnd_1': (1, 0),
-    'sky130_fd_sc_hd__tapvpwrvgnd_1': (1, 0),
-    'sky130_fd_sc_hd__tap_1': (1, 0),
-    'sky130_fd_sc_hd__tap_2': (2, 0),
-}
 
-import sys
+def _broadcast_sky130_cell_statistics_from_file(filename, stats_queue, verbose=False):
+    '''Send thread-safe statistical updates while parsing'''
 
-if len(sys.argv) < 2:
-    print("Usage: {sys.argv[0]} <gatelevel.v>", file=sys.stderr)
-    exit(1)
+    #TODO: for perf, what if we just yield as a generator instead of spin off another thread?
+    file_statistics = {
+        'cells': 0,
+        'sites': 0,
+        'transistors': 0,
+        'cells_with_filler': 0,
+        'sites_with_filler': 0,
+        'transistors_with_filler': 0,
+    }
+    for cell in find_sky130_cells_in_file(filename):
+        is_filler = cell in _FILLER_CELLS
+        sites, transistors = _FILLER_CELLS[cell] if is_filler else _REGULAR_CELLS[cell]
+        if verbose:
+            print(f'{filename}:  {cell}  => ({"Filler" if is_filler else "Regular"}, {sites}, {transistors})')
 
-print('file,cells,sites,transistors,cells_with_fill,sites_with_fill,transistors_with_fill')
-for f in sys.argv[1:]:
-    ncell_r, nsite_r, ntrans_r = 0, 0, 0
-    ncell_t, nsite_t, ntrans_t = 0, 0, 0
-    for l in open(f):
-        l = l.strip()
-        if not l:
-            continue
-        e = l.split()[0]
-        if e.startswith('sky130_'):
-            rc = e in regular_cells
-            fc = e in filler_cells
-            if rc or fc:
-                if rc:
-                    site, trans = regular_cells[e]
-                    ncell_r += 1
-                    nsite_r += site
-                    ntrans_r += trans
-                else:
-                    site, trans = filler_cells[e]
-                ncell_t += 1
-                nsite_t += site
-                ntrans_t += trans
-    print(f'{f},{ncell_r},{nsite_r},{ntrans_r},{ncell_t},{nsite_t},{ntrans_t}')
+        file_statistics['cells_with_filler'] += 1
+        file_statistics['sites_with_filler'] += sites
+        file_statistics['transistors_with_filler'] += transistors
+        if not is_filler:
+            file_statistics['cells'] += 1
+            file_statistics['sites'] += sites
+            file_statistics['transistors'] += transistors
+    
+    stats_queue.put(file_statistics)
+
+
+def find_sky130_cells_in_file(filename, cell_pattern=_CELL_PATTERN, chunk_size=_PAGE_SIZE):
+    '''Parse file for `sky130_` references'''
+
+    with open(filename) as file:
+        while True:
+            chunk = file.read(chunk_size)
+            if not chunk:
+                break
+
+            matches = re.findall(cell_pattern, chunk)
+            for match in matches:
+                yield match
+
+
+def get_sky130_cell_statistics_from_files(filenames, verbose=False):
+    '''Aggregate sky130 cell statistics from 1+ files'''
+
+    # Parse files concurrently
+    stats_queue = queue.Queue()
+    threads = []
+    for filename in filenames:
+        thread = threading.Thread(
+            target=_broadcast_sky130_cell_statistics_from_file,
+            args=(filename, stats_queue, verbose)
+        )
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+    
+    # Aggregate results once parsers complete
+    total_statistics = {
+        'cells': 0,
+        'sites': 0,
+        'transistors': 0,
+        'cells_with_filler': 0,
+        'sites_with_filler': 0,
+        'transistors_with_filler': 0,
+    }
+    while not stats_queue.empty():
+        file_statistics = stats_queue.get()
+        total_statistics = {stat: total_statistics[stat] + file_statistics[stat] for stat in total_statistics}
+        if verbose:
+            print(total_statistics, end='\r')  # Overwrites previous line
+    
+    return total_statistics
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Report Skywater 130nm usage statistics')
+    parser.add_argument('filenames', nargs='+', help='1+ file(s) to parse (for example, "gate-level.v")')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Use verbose output')
+    args = parser.parse_args()
+
+    cell_statistics = get_sky130_cell_statistics_from_files(**vars(args))
+    print(cell_statistics)
 
