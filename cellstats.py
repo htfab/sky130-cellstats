@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-
+#
 # Mapping of sky130 hd cells to number of sites and number of transistors
 # (each site has a width of 460 nm and a height of 2720 nm)
 
-import collections
+import mmap
 import os
-import queue
 import re
-import threading
-import cProfile as profile
 
-_CELL_PATTERN = re.compile(r'(sky130_\w+) ')
-_DEFAULT_CHUNK_SIZE = os.sysconf('SC_PAGE_SIZE') or 4096
+_CELL_PATTERN = re.compile(r'(sky130_\w+) '.encode())
 _FILLER_CELLS = {
     'sky130_ef_sc_hd__decap_12': (12, 2),
     'sky130_ef_sc_hd__fakediode_2': (2, 0),
@@ -459,8 +455,13 @@ _REGULAR_CELLS = {
 }
 
 
-def get_sky130_cell_statistics_from_file(filename, chunk_size=_DEFAULT_CHUNK_SIZE, verbose=False):
+def get_sky130_cell_statistics_from_file(filename, verbose=False):
     '''Send thread-safe statistical updates while parsing'''
+
+    global _CELL_PATTERN, _FILLER_CELLS, _REGULAR_CELLS
+    #NOTE: to reduce RegEx search time & benefit from mmap, we'll make these structures easier to match
+    filler_cells = {(k + ' ').encode(): v for k, v in _FILLER_CELLS.items()}
+    regular_cells = {(k + ' ').encode(): v for k, v in _REGULAR_CELLS.items()}
 
     file_statistics = {
         'cells': 0,
@@ -470,38 +471,29 @@ def get_sky130_cell_statistics_from_file(filename, chunk_size=_DEFAULT_CHUNK_SIZ
         'sites_with_filler': 0,
         'transistors_with_filler': 0,
     }
-    for cell in find_sky130_cells_in_file(filename, chunk_size=chunk_size):
-        is_filler = cell in _FILLER_CELLS
-        sites, transistors = _FILLER_CELLS[cell] if is_filler else _REGULAR_CELLS[cell]
-        if verbose:
-            print(f'{filename}:  {cell}  => ({"Filler" if is_filler else "Regular"}, {sites}, {transistors})')
+    with open(filename, 'rb') as file:
+        # Memory-map large files for quick access
+        with mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as mmfile:
+            for match in _CELL_PATTERN.finditer(mmfile):
+                cell = match[0]
+                
+                is_filler = cell in filler_cells
+                sites, transistors = filler_cells[cell] if is_filler else regular_cells[cell]
+                if verbose:
+                    print(f'{filename}:  {cell}  => ({"Filler" if is_filler else "Regular"}, {sites}, {transistors})')
 
-        file_statistics['cells_with_filler'] += 1
-        file_statistics['sites_with_filler'] += sites
-        file_statistics['transistors_with_filler'] += transistors
-        if not is_filler:
-            file_statistics['cells'] += 1
-            file_statistics['sites'] += sites
-            file_statistics['transistors'] += transistors
+                file_statistics['cells_with_filler'] += 1
+                file_statistics['sites_with_filler'] += sites
+                file_statistics['transistors_with_filler'] += transistors
+                if not is_filler:
+                    file_statistics['cells'] += 1
+                    file_statistics['sites'] += sites
+                    file_statistics['transistors'] += transistors
 
     return file_statistics
 
 
-def find_sky130_cells_in_file(filename, cell_pattern=_CELL_PATTERN, chunk_size=_DEFAULT_CHUNK_SIZE):
-    '''Parse file for `sky130_` references'''
-
-    with open(filename) as file:
-        while True:
-            chunk = file.read(chunk_size)
-            if not chunk:
-                break
-
-            matches = re.findall(cell_pattern, chunk)
-            for match in matches:
-                yield match
-
-
-def get_sky130_cell_statistics_from_files(filenames, verbose=False, chunk_size=_DEFAULT_CHUNK_SIZE, *args, **kwargs):
+def get_sky130_cell_statistics_from_files(filenames, verbose=False, *args, **kwargs):
     '''Aggregate sky130 cell statistics from 1+ files'''
     
     total_statistics = {
@@ -513,7 +505,7 @@ def get_sky130_cell_statistics_from_files(filenames, verbose=False, chunk_size=_
         'transistors_with_filler': 0,
     }
     for filename in filenames:
-        file_statistics = get_sky130_cell_statistics_from_file(filename, chunk_size, verbose)
+        file_statistics = get_sky130_cell_statistics_from_file(filename, verbose)
         print(f'{filename},{file_statistics["cells"]},{file_statistics["sites"]},{file_statistics["transistors"]},{file_statistics["cells_with_filler"]},{file_statistics["sites_with_filler"]},{file_statistics["transistors_with_filler"]}')
 
         total_statistics = {stat: total_statistics[stat] + file_statistics[stat] for stat in total_statistics}
@@ -528,12 +520,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Report Skywater 130nm usage statistics')
     parser.add_argument('filenames', nargs='+', help='1+ file(s) to parse (for example, "gate-level.v")')
     parser.add_argument('-v', '--verbose', action='store_true', help='Use verbose output')
-    parser.add_argument('-c', '--chunk', type=int, dest='chunk_size', metavar='CHUNK_SIZE', help='Tune file I/O read size')
     args = parser.parse_args()
 
     print('file,cells,sites,transistors,cells_with_fill,sites_with_fill,transistors_with_fill')
     cell_statistics = get_sky130_cell_statistics_from_files(**vars(args))
-
     if args.verbose:
-        print(cell_statistics)
+            print(cell_statistics)
 
