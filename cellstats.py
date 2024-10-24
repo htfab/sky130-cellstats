@@ -8,8 +8,9 @@ import os
 import queue
 import re
 import threading
+import cProfile as profile
 
-_CELL_PATTERN = r'\b(sky130_\w+) \b'
+_CELL_PATTERN = re.compile(r'(sky130_\w+) ')
 _DEFAULT_CHUNK_SIZE = os.sysconf('SC_PAGE_SIZE') or 4096
 _FILLER_CELLS = {
     'sky130_ef_sc_hd__decap_12': (12, 2),
@@ -458,10 +459,9 @@ _REGULAR_CELLS = {
 }
 
 
-def _broadcast_sky130_cell_statistics_from_file(filename, stats_queue, verbose=False, chunk_size=_DEFAULT_CHUNK_SIZE):
+def get_sky130_cell_statistics_from_file(filename, chunk_size=_DEFAULT_CHUNK_SIZE, verbose=False):
     '''Send thread-safe statistical updates while parsing'''
 
-    #TODO: for perf, what if we just yield as a generator instead of spin off another thread?
     file_statistics = {
         'cells': 0,
         'sites': 0,
@@ -483,8 +483,8 @@ def _broadcast_sky130_cell_statistics_from_file(filename, stats_queue, verbose=F
             file_statistics['cells'] += 1
             file_statistics['sites'] += sites
             file_statistics['transistors'] += transistors
-    
-    stats_queue.put(file_statistics)
+
+    return file_statistics
 
 
 def find_sky130_cells_in_file(filename, cell_pattern=_CELL_PATTERN, chunk_size=_DEFAULT_CHUNK_SIZE):
@@ -503,22 +503,7 @@ def find_sky130_cells_in_file(filename, cell_pattern=_CELL_PATTERN, chunk_size=_
 
 def get_sky130_cell_statistics_from_files(filenames, verbose=False, chunk_size=_DEFAULT_CHUNK_SIZE, *args, **kwargs):
     '''Aggregate sky130 cell statistics from 1+ files'''
-
-    # Parse files concurrently
-    stats_queue = queue.Queue()
-    threads = []
-    for filename in filenames:
-        thread = threading.Thread(
-            target=_broadcast_sky130_cell_statistics_from_file,
-            args=(filename, stats_queue, verbose, chunk_size)
-        )
-        threads.append(thread)
-        thread.start()
-
-    for thread in threads:
-        thread.join()
     
-    # Aggregate results once parsers complete
     total_statistics = {
         'cells': 0,
         'sites': 0,
@@ -527,8 +512,10 @@ def get_sky130_cell_statistics_from_files(filenames, verbose=False, chunk_size=_
         'sites_with_filler': 0,
         'transistors_with_filler': 0,
     }
-    while not stats_queue.empty():
-        file_statistics = stats_queue.get()
+    for filename in filenames:
+        file_statistics = get_sky130_cell_statistics_from_file(filename, chunk_size, verbose)
+        print(f'{filename},{file_statistics["cells"]},{file_statistics["sites"]},{file_statistics["transistors"]},{file_statistics["cells_with_filler"]},{file_statistics["sites_with_filler"]},{file_statistics["transistors_with_filler"]}')
+
         total_statistics = {stat: total_statistics[stat] + file_statistics[stat] for stat in total_statistics}
         if verbose:
             print(total_statistics, end='\r')  # Overwrites previous line
@@ -541,10 +528,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Report Skywater 130nm usage statistics')
     parser.add_argument('filenames', nargs='+', help='1+ file(s) to parse (for example, "gate-level.v")')
     parser.add_argument('-v', '--verbose', action='store_true', help='Use verbose output')
-    parser.add_argument('-c', '--chunk', type=int, dest='chunk_size', metavar='CHUNK_SIZE', help='Tune file i/o read size')
+    parser.add_argument('-c', '--chunk', type=int, dest='chunk_size', metavar='CHUNK_SIZE', help='Tune file I/O read size')
     args = parser.parse_args()
 
-    cell_statistics = get_sky130_cell_statistics_from_files(**vars(args))
     print('file,cells,sites,transistors,cells_with_fill,sites_with_fill,transistors_with_fill')
-    print(cell_statistics)
+    cell_statistics = get_sky130_cell_statistics_from_files(**vars(args))
+
+    if args.verbose:
+        print(cell_statistics)
 
