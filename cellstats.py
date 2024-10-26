@@ -4,7 +4,6 @@
 # (each site has a width of 460 nm and a height of 2720 nm)
 
 import mmap
-import os
 import re
 
 _CELL_PATTERN = re.compile(r'(sky130_\w+) '.encode())
@@ -456,14 +455,15 @@ _REGULAR_CELLS = {
 
 
 def get_sky130_cell_statistics_from_file(filename, verbose=False):
-    '''Send thread-safe statistical updates while parsing'''
+    '''Count Skywater 130nm cells, sites, & transistors in file (with fillers seperately)'''
 
     global _CELL_PATTERN, _FILLER_CELLS, _REGULAR_CELLS
-    #NOTE: to reduce RegEx search time & benefit from mmap, we'll make these structures easier to match
+    # Pre-process structures to significantly reduce RegEx search time
     filler_cells = {(k + ' ').encode(): v for k, v in _FILLER_CELLS.items()}
     regular_cells = {(k + ' ').encode(): v for k, v in _REGULAR_CELLS.items()}
 
     file_statistics = {
+        'filename': filename,
         'cells': 0,
         'sites': 0,
         'transistors': 0,
@@ -472,7 +472,7 @@ def get_sky130_cell_statistics_from_file(filename, verbose=False):
         'transistors_with_filler': 0,
     }
     with open(filename, 'rb') as file:
-        # Memory-map large files for quick access
+        # Reduce SLOW file I/O when scaning large files
         with mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as mmfile:
             for match in _CELL_PATTERN.finditer(mmfile):
                 cell = match[0]
@@ -493,28 +493,6 @@ def get_sky130_cell_statistics_from_file(filename, verbose=False):
     return file_statistics
 
 
-def get_sky130_cell_statistics_from_files(filenames, verbose=False, *args, **kwargs):
-    '''Aggregate sky130 cell statistics from 1+ files'''
-    
-    total_statistics = {
-        'cells': 0,
-        'sites': 0,
-        'transistors': 0,
-        'cells_with_filler': 0,
-        'sites_with_filler': 0,
-        'transistors_with_filler': 0,
-    }
-    for filename in filenames:
-        file_statistics = get_sky130_cell_statistics_from_file(filename, verbose)
-        print(f'{filename},{file_statistics["cells"]},{file_statistics["sites"]},{file_statistics["transistors"]},{file_statistics["cells_with_filler"]},{file_statistics["sites_with_filler"]},{file_statistics["transistors_with_filler"]}')
-
-        total_statistics = {stat: total_statistics[stat] + file_statistics[stat] for stat in total_statistics}
-        if verbose:
-            print(total_statistics, end='\r')  # Overwrites previous line
-    
-    return total_statistics
-
-
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Report Skywater 130nm usage statistics')
@@ -523,7 +501,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     print('file,cells,sites,transistors,cells_with_fill,sites_with_fill,transistors_with_fill')
-    cell_statistics = get_sky130_cell_statistics_from_files(**vars(args))
-    if args.verbose:
-            print(cell_statistics)
+    for filename in args.filenames:
+        file_statistics = get_sky130_cell_statistics_from_file(filename, args.verbose)
 
+        print(','.join(
+            str(val)
+            for val in file_statistics.values()
+        ))
